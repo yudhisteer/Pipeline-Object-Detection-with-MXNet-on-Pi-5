@@ -1,0 +1,9 @@
+[project]
+name = "pipeline-vanilla-object-detection"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fiftyone>=1.7.2",
+]
