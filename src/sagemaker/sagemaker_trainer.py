@@ -6,37 +6,50 @@ import sagemaker
 from sagemaker import get_execution_role, image_uris
 from sagemaker.tuner import CategoricalParameter, ContinuousParameter, HyperparameterTuner
 import os
-from typing import Dict, Optional, Tuple
+import sys
+from typing import Dict, Optional, Tuple, Any
 from dotenv import load_dotenv
 import boto3
 
-from consts import TRAIN_REC_PATH, VALIDATION_REC_PATH
+# Add src directory to path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils import (
+    load_config,
+    get_data_config,
+    get_aws_config,
+    get_training_config,
+    get_hyperparameters_config,
+    get_tuning_config,
+    get_runtime_config,
+)
 
 load_dotenv()
+
 
 class SageMakerTrainer:
     """Handles SageMaker model training for object detection."""
     
-    def __init__(self, 
-                 prefix: str = "plastic-bag-detection", 
-                 bucket: str = os.getenv('BUCKET'), 
-                 role_arn: Optional[str] = None, 
-                 region: Optional[str] = None
-                 ):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
-        Initialize SageMaker trainer.
+        Initialize SageMaker trainer with configuration.
         
         Args:
-            bucket: S3 bucket name for storing data and models
-            prefix: S3 prefix for organizing data
-            role_arn: SageMaker execution role ARN (required for local development)
-            region: AWS region (defaults to session region)
+            config: Configuration dictionary loaded from YAML file
         """
-        self.bucket = bucket
-        self.prefix = prefix
+        self.config = config or {}
+        
+        # Extract AWS configuration
+        aws_config = get_aws_config(self.config)
+        self.bucket = aws_config.get('bucket') or os.getenv('BUCKET')
+        self.prefix = aws_config.get('prefix', 'plastic-bag-detection')
+        self.role_arn = aws_config.get('role_arn') or os.getenv('ROLE_ARN')
+        region = aws_config.get('region')
+        
+        if not self.bucket:
+            raise ValueError("Bucket must be specified in config.yaml or BUCKET environment variable")
+            
         self.sess = sagemaker.Session()
         self.region = region or self.sess.boto_region_name
-        self.role_arn = role_arn or os.getenv('ROLE_ARN')
         
         # Handle role for local development
         if self.role_arn:
@@ -53,29 +66,31 @@ class SageMakerTrainer:
         # S3 paths
         self.s3_train_data = None
         self.s3_validation_data = None
-        self.s3_output_location = f"s3://{bucket}/{prefix}/output"
+        self.s3_output_location = f"s3://{self.bucket}/{self.prefix}/output"
         
         # Training components
         self.od_model = None
         self.tuner = None
         
-        print(f"Initialized SageMaker trainer for bucket: {bucket}, prefix: {prefix}")
+        print(f"Initialized SageMaker trainer for bucket: {self.bucket}, prefix: {self.prefix}")
         print(f"Output location: {self.s3_output_location}")
     
-    def upload_data_to_s3(self, 
-                          train_rec_path: str = TRAIN_REC_PATH, 
-                          test_rec_path: str = VALIDATION_REC_PATH
-                          ) -> Tuple[str, str]:
+    def upload_data_to_s3(self) -> Tuple[str, str]:
         """
         Upload training and validation data to S3.
         
-        Args:
-            train_rec_path: Local path to training record file
-            test_rec_path: Local path to test/validation record file
-            
         Returns:
             Tuple of (train_s3_path, validation_s3_path)
         """
+        # Get data paths from config
+        data_config = get_data_config(self.config)
+        train_rec_path = data_config.get('train_path')
+        test_rec_path = data_config.get('validation_path')
+        
+        if not train_rec_path:
+            raise ValueError("train_path must be specified in config.yaml under 'data' section")
+        if not test_rec_path:
+            raise ValueError("validation_path must be specified in config.yaml under 'data' section")
         if not os.path.exists(train_rec_path):
             raise FileNotFoundError(f"Training data not found: {train_rec_path}")
         if not os.path.exists(test_rec_path):
@@ -96,24 +111,19 @@ class SageMakerTrainer:
         
         return self.s3_train_data, self.s3_validation_data
     
-    def create_estimator(self, 
-                         instance_type: str = "ml.p3.2xlarge", 
-                         instance_count: int = 1, 
-                         volume_size: int = 50,
-                         max_run: int = 360000
-                         ) -> sagemaker.estimator.Estimator:
+    def create_estimator(self) -> sagemaker.estimator.Estimator:
         """
         Create SageMaker estimator for object detection.
         
-        Args:
-            instance_type: EC2 instance type for training
-            instance_count: Number of instances
-            volume_size: EBS volume size in GB
-            max_run: Maximum training time in seconds
-            
         Returns:
             Configured SageMaker estimator
         """
+        # Get training configuration
+        training_config = get_training_config(self.config)
+        instance_type = training_config.get('instance_type', 'ml.p3.2xlarge')
+        instance_count = training_config.get('instance_count', 1)
+        volume_size = training_config.get('volume_size', 50)
+        max_run = training_config.get('max_run', 360000)
         # Get the object detection container image
         training_image = image_uris.retrieve(
             region=self.region,
@@ -139,41 +149,32 @@ class SageMakerTrainer:
         print(f"Created estimator with instance type: {instance_type}")
         return self.od_model
     
-    def set_hyperparameters(self, 
-                            num_training_samples: int = 44, # number of images in plastic_bag/images/train
-                            num_epochs: int = 100, 
-                            lr_steps: str = "50,70,80,90,95",
-                            **kwargs
-                            ):
+    def set_hyperparameters(self):
         """
-        Set hyperparameters for object detection model.
-        
-        Args:
-            num_training_samples: Number of training samples
-            num_epochs: Number of training epochs
-            lr_steps: Learning rate schedule steps
-            **kwargs: Additional hyperparameters to override defaults
+        Set hyperparameters for object detection model using configuration.
         """
         if self.od_model is None:
             raise ValueError("Must create estimator first using create_estimator()")
         
-        # Default hyperparameters
-        hyperparams = {
-            "base_network": "resnet-50", # ResNet-50 backbone
-            "use_pretrained_model": 1, # transfer learning | use pre-trained weights
-            "num_classes": 1,  # Only plastic bags
-            "epochs": num_epochs,
-            "lr_scheduler_step": lr_steps,
-            "lr_scheduler_factor": 0.1,
-            "momentum": 0.9, # SGD momentum
-            "weight_decay": 0.0005,
-            "nms_threshold": 0.45,
-            "image_shape": 512,
-            "num_training_samples": num_training_samples
-        }
+        # Get hyperparameters from config
+        hyperparams_config = get_hyperparameters_config(self.config)
+        data_config = get_data_config(self.config)
+        training_config = get_training_config(self.config)
         
-        # Override with any provided kwargs
-        hyperparams.update(kwargs)
+        # Build hyperparameters from config with defaults
+        hyperparams = {
+            "base_network": hyperparams_config.get('base_network', 'resnet-50'),
+            "use_pretrained_model": hyperparams_config.get('use_pretrained_model', 1),
+            "num_classes": hyperparams_config.get('num_classes', 1),
+            "epochs": training_config.get('epochs', 100),
+            "lr_scheduler_step": hyperparams_config.get('lr_scheduler_step', '50,70,80,90,95'),
+            "lr_scheduler_factor": hyperparams_config.get('lr_scheduler_factor', 0.1),
+            "momentum": hyperparams_config.get('momentum', 0.9),
+            "weight_decay": hyperparams_config.get('weight_decay', 0.0005),
+            "nms_threshold": hyperparams_config.get('nms_threshold', 0.45),
+            "image_shape": hyperparams_config.get('image_shape', 512),
+            "num_training_samples": data_config.get('num_training_samples', 44)
+        }
         
         self.od_model.set_hyperparameters(**hyperparams)
         
@@ -181,36 +182,43 @@ class SageMakerTrainer:
         for key, value in hyperparams.items():
             print(f"  {key}: {value}")
     
-    def create_hyperparameter_tuner(self, 
-                                    max_jobs: int = 8,
-                                    max_parallel_jobs: int = 1
-                                    ) -> HyperparameterTuner:
+    def create_hyperparameter_tuner(self) -> HyperparameterTuner:
         """
         Create hyperparameter tuner for automatic hyperparameter optimization.
         
-        Args:
-            max_jobs: Maximum number of tuning jobs
-            max_parallel_jobs: Maximum parallel tuning jobs
-            
         Returns:
             Configured hyperparameter tuner
         """
         if self.od_model is None:
             raise ValueError("Must create estimator first using create_estimator()")
         
-        # Define hyperparameter ranges for tuning
-        hyperparameter_ranges = {
-            "learning_rate": ContinuousParameter(0.001, 0.1), # Learning rate range
-            "mini_batch_size": CategoricalParameter([2, 4]), # Batch size options [8, 16, 32] if more images
-            "optimizer": CategoricalParameter(["sgd", "adam"]) # Optimizer options
-        }
+        # Get tuning configuration
+        tuning_config = get_tuning_config(self.config)
+        max_jobs = tuning_config.get('max_jobs', 8)
+        max_parallel_jobs = tuning_config.get('max_parallel_jobs', 1)
+        objective_metric = tuning_config.get('objective_metric', 'validation:mAP')
+        objective_type = tuning_config.get('objective_type', 'Maximize')
+        
+        # Build hyperparameter ranges from config
+        hyperparameter_ranges = {}
+        ranges_config = tuning_config.get('hyperparameter_ranges', {})
+        
+        for param_name, param_config in ranges_config.items():
+            if param_config['type'] == 'continuous':
+                hyperparameter_ranges[param_name] = ContinuousParameter(
+                    param_config['min'], param_config['max']
+                )
+            elif param_config['type'] == 'categorical':
+                hyperparameter_ranges[param_name] = CategoricalParameter(
+                    param_config['values']
+                )
         
         # Create tuner
         self.tuner = HyperparameterTuner(
             estimator=self.od_model,
-            objective_metric_name="validation:mAP",
+            objective_metric_name=objective_metric,
             hyperparameter_ranges=hyperparameter_ranges,
-            objective_type="Maximize", # We want to maximize mAP
+            objective_type=objective_type,
             max_jobs=max_jobs,
             max_parallel_jobs=max_parallel_jobs
         )
@@ -218,7 +226,8 @@ class SageMakerTrainer:
         print(f"Created hyperparameter tuner:")
         print(f"  Max jobs: {max_jobs}")
         print(f"  Max parallel jobs: {max_parallel_jobs}")
-        print(f"  Objective: Maximize validation:mAP")
+        print(f"  Objective: {objective_type} {objective_metric}")
+        print(f"  Hyperparameter ranges: {list(hyperparameter_ranges.keys())}")
         
         return self.tuner
     
@@ -254,20 +263,18 @@ class SageMakerTrainer:
         
         return data_channels
     
-    def start_training(self, 
-                       use_tuner: bool = True, 
-                       wait: bool = True, 
-                       logs: bool = True
-                       ):
+    def start_training(self):
         """
-        Start training job.
-        
-        Args:
-            use_tuner: Whether to use hyperparameter tuning
-            wait: Whether to wait for job completion
-            logs: Whether to show training logs
+        Start training job using configuration settings.
         """
         data_channels = self.prepare_training_data()
+        
+        # Get runtime configuration
+        runtime_config = get_runtime_config(self.config)
+        tuning_config = get_tuning_config(self.config)
+        wait = runtime_config.get('wait_for_completion', True)
+        logs = runtime_config.get('show_logs', True)
+        use_tuner = tuning_config.get('enabled', True)
         
         if use_tuner:
             if self.tuner is None:
@@ -313,42 +320,45 @@ class SageMakerTrainer:
 
 
 def main():
-    """Example usage of SageMaker trainer."""
+    """Configuration-driven SageMaker training."""
     import argparse
     
     parser = argparse.ArgumentParser(description="Train plastic bag detection model on SageMaker")
-    parser.add_argument("--bucket", required=True, help="S3 bucket name")
-    parser.add_argument("--prefix", required=True, help="S3 prefix")
-    parser.add_argument("--train-data", default=TRAIN_REC_PATH, help="Path to training data")
-    parser.add_argument("--test-data", default=VALIDATION_REC_PATH, help="Path to test data")
-    parser.add_argument("--instance-type", default="ml.p3.2xlarge", help="Training instance type")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    parser.add_argument("--use-tuner", action="store_true", help="Use hyperparameter tuning")
-    parser.add_argument("--max-jobs", type=int, default=8, help="Max tuning jobs")
-    parser.add_argument("--role-arn", help="SageMaker execution role ARN (required for local development)")
+    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
     
     args = parser.parse_args()
     
-    # Create trainer
-    trainer = SageMakerTrainer(bucket=args.bucket, prefix=args.prefix, role_arn=args.role_arn)
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    config = load_config(args.config)
+    
+    # Create trainer with configuration
+    trainer = SageMakerTrainer(config)
     
     # Upload data
-    trainer.upload_data_to_s3(args.train_data, args.test_data)
+    print("Uploading training data to S3...")
+    trainer.upload_data_to_s3()
     
     # Create estimator
-    trainer.create_estimator(instance_type=args.instance_type)
+    print("Creating SageMaker estimator...")
+    trainer.create_estimator()
     
     # Set hyperparameters
-    trainer.set_hyperparameters(num_epochs=args.epochs)
+    print("Setting hyperparameters...")
+    trainer.set_hyperparameters()
     
-    # Optionally create tuner
-    if args.use_tuner:
-        trainer.create_hyperparameter_tuner(max_jobs=args.max_jobs)
+    # Create tuner if enabled
+    tuning_config = get_tuning_config(config)
+    if tuning_config.get('enabled', True):
+        print("Creating hyperparameter tuner...")
+        trainer.create_hyperparameter_tuner()
     
     # Start training
-    trainer.start_training(use_tuner=args.use_tuner)
+    print("Starting training job...")
+    trainer.start_training()
     
     # Get model artifacts
+    print("Getting model artifacts...")
     model_path = trainer.get_model_artifacts()
     print(f"Training complete! Model saved to: {model_path}")
 
@@ -357,15 +367,15 @@ if __name__ == "__main__":
     main()
 
     """
+    Configuration-driven SageMaker training
+    
     How to use:
-    python sagemaker_trainer.py --bucket <bucket-name> --prefix <prefix> --instance-type <instance-type> --epochs <epochs> --use-tuner --max-jobs <max-jobs> --role-arn <role-arn>
+    python src/sagemaker/sagemaker_trainer.py [--config path/to/config.yaml]
     
-    Example:
-    python src/sagemaker/sagemaker_trainer.py --bucket cyudhist-pipeline-mxnet-503561429929 --prefix plastic-bag-detection --instance-type ml.p3.2xlarge --epochs 100 --use-tuner --max-jobs 8 --role-arn arn:aws:iam::503561429929:role/SageMakerExecutionRole-Pipeline-MXNet
+    Default usage (uses config.yaml in project root):
+    python src/sagemaker/sagemaker_trainer.py
     
-    Note:
-    - The train.rec and test.rec files should be in the same directory as the script.
-    - The instance type should be a valid SageMaker instance type.
-    - The role ARN is required when running locally (not on SageMaker notebook instance).
+    Custom config file:
+    python src/sagemaker/sagemaker_trainer.py --config my_config.yaml
     """
     
