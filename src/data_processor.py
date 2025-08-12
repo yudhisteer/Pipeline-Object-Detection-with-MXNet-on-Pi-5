@@ -10,29 +10,32 @@ import csv
 from pathlib import Path
 from PIL import Image
 from sklearn.model_selection import train_test_split
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Any
 
-
-from consts import VALIDATION_LABEL_PATH, TRAIN_LABEL_PATH, TRAIN_DATA_IMAGES, VALIDATION_DATA_IMAGES, CLASS_NAME
+from utils import load_config, get_data_config
 
 
 class DataProcessor:
     """Handles data processing including train-test split and augmentation."""
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, config: Dict[str, Any] = None):
         """
-        Initialize DataProcessor with base directory path.
+        Initialize DataProcessor with configuration.
         
         Args:
-            base_dir: Base directory containing the dataset. Defaults to 'dataset'
+            config: Configuration dictionary from YAML file
         """
-        if base_dir is None:
-            base_dir = 'dataset'
-        self.base_dir = base_dir
-        self.train_images_dir = TRAIN_DATA_IMAGES
-        self.val_images_dir = VALIDATION_DATA_IMAGES
-        self.class_name = CLASS_NAME
-        self.output_dir = os.path.join(base_dir, self.class_name)
+        self.config = config or load_config()
+        data_config = get_data_config(self.config)
+        
+        self.base_dir = data_config.get('base_dir', 'dataset')
+        self.train_images_dir = data_config.get('train_images_dir', 'dataset/train/data')
+        self.val_images_dir = data_config.get('validation_images_dir', 'dataset/validation/data')
+        self.class_name = data_config.get('class_name', 'plastic_bag')
+        self.output_dir = os.path.join(self.base_dir, self.class_name)
+        self.output_data_dir = data_config.get('output_dir', 'output')
+        self.test_size = data_config.get('test_size', 0.2)
+        self.random_state = data_config.get('random_state', 42)
     
     def load_processed_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -41,28 +44,25 @@ class DataProcessor:
         Returns:
             Tuple of (train_df, validation_df)
         """
-        df_train = pd.read_csv('output/processed_train_data.csv')
-        df_validation = pd.read_csv('output/processed_validation_data.csv')
+        df_train = pd.read_csv(f'{self.output_data_dir}/processed_train_data.csv')
+        df_validation = pd.read_csv(f'{self.output_data_dir}/processed_validation_data.csv')
         
         print(f"Loaded {len(df_train)} training annotations")
         print(f"Loaded {len(df_validation)} validation annotations")
         
         return df_train, df_validation
     
-    def create_train_test_split(self, df_train: pd.DataFrame, test_size: float = 0.2, 
-                               random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def create_train_test_split(self, df_train: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Split training data into train and test sets.
+        Split training data into train and test sets using configuration.
         
         Args:
             df_train: Training DataFrame
-            test_size: Proportion of data to use for testing
-            random_state: Random seed for reproducibility
             
         Returns:
             Tuple of (train_split, test_split)
         """
-        train, test = train_test_split(df_train, test_size=test_size, random_state=random_state)
+        train, test = train_test_split(df_train, test_size=self.test_size, random_state=self.random_state)
         
         print(f"Train set: {len(train)} annotations")
         print(f"Test set: {len(test)} annotations")
@@ -317,8 +317,19 @@ class DataProcessor:
 
 
 def main():
-    """Main function to demonstrate data processing."""
-    processor = DataProcessor()
+    """Configuration-driven data processing."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Process plastic bag detection data")
+    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
+    
+    args = parser.parse_args()
+    
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    config = load_config(args.config)
+    
+    processor = DataProcessor(config)
     processor.process_complete_dataset()
 
 

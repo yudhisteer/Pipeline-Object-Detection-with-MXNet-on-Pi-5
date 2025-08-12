@@ -6,6 +6,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict, Any
+
+from utils import load_config, get_data_config
 
 # Fix NumPy compatibility issue with MXNet
 try:
@@ -21,27 +24,25 @@ try:
 except ImportError:
     pass
 
-from consts import CLASS_NAME
 
 class MXNetConverter:
     """Handles conversion of data to MXNet record format."""
     
-    def __init__(self, base_dir: str = None, resize_size: int = 256):
+    def __init__(self, config: Dict[str, Any] = None):
         """
-        Initialize MXNetConverter.
+        Initialize MXNetConverter with configuration.
         
         Args:
-            base_dir: Base directory containing the dataset. Defaults to 'dataset'
-            resize_size: Size to resize images to
+            config: Configuration dictionary from YAML file
         """
-        if base_dir is None:
-            base_dir = 'dataset'
+        self.config = config or load_config()
+        data_config = get_data_config(self.config)
         
-        self.base_dir = base_dir
-        self.class_name = CLASS_NAME
-        self.output_dir = os.path.join(base_dir, self.class_name)
-        self.resize_size = resize_size
-        self.tools_dir = 'tools'
+        self.base_dir = data_config.get('base_dir', 'dataset')
+        self.class_name = data_config.get('class_name', 'plastic_bag')
+        self.output_dir = os.path.join(self.base_dir, self.class_name)
+        self.resize_size = data_config.get('resize_size', 256)
+        self.tools_dir = data_config.get('tools_dir', 'tools')
     
     def install_dependencies(self):
         """Install required dependencies for MXNet conversion."""
@@ -193,8 +194,19 @@ class MXNetConverter:
 
 
 def main():
-    """Main function to demonstrate MXNet conversion."""
-    converter = MXNetConverter()
+    """Configuration-driven MXNet conversion."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Convert plastic bag detection data to MXNet format")
+    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
+    
+    args = parser.parse_args()
+    
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    config = load_config(args.config)
+    
+    converter = MXNetConverter(config)
     
     success = converter.convert_all_splits()
     
