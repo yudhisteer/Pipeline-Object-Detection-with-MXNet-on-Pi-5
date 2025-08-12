@@ -25,6 +25,21 @@ import sys
 
 curr_path = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(curr_path, "../python"))
+
+# Fix NumPy compatibility issue with MXNet
+try:
+    import numpy as np
+    if not hasattr(np, 'bool'):
+        np.bool = bool
+        np.int = int 
+        np.float = float
+        np.complex = complex
+        np.object = object
+        np.unicode = str
+        np.str = str
+except ImportError:
+    pass
+
 import mxnet as mx
 import random
 import argparse
