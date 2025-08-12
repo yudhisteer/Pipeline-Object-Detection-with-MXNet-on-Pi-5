@@ -7,42 +7,45 @@ import pandas as pd
 import os
 import glob
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Any
 
-
-from consts import VALIDATION_LABEL_PATH, TRAIN_LABEL_PATH, TRAIN_DATA_IMAGES, VALIDATION_DATA_IMAGES
+    
+from utils import load_config, get_data_config
 
 
 class DataLoader:
     """Handles loading and preprocessing of the plastic bag detection dataset."""
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, config: Dict[str, Any] = None):
         """
-        Initialize DataLoader with base directory path.
+        Initialize DataLoader with configuration.
         
         Args:
-            base_dir: Base directory containing the dataset. Defaults to 'dataset'
+            config: Configuration dictionary from YAML file
         """
-        if base_dir is None:
-            base_dir = 'dataset'
+        self.config = config or load_config()
+        data_config = get_data_config(self.config)
         
-        self.base_dir = base_dir
-        self.train_json_path = TRAIN_LABEL_PATH
-        self.val_json_path = VALIDATION_LABEL_PATH
-        self.train_images_dir = TRAIN_DATA_IMAGES
-        self.val_images_dir = VALIDATION_DATA_IMAGES
+        self.base_dir = data_config.get('base_dir', 'dataset')
+        self.train_json_path = data_config.get('train_labels_path', 'dataset/train/labels.json')
+        self.val_json_path = data_config.get('validation_labels_path', 'dataset/validation/labels.json')
+        self.train_images_dir = data_config.get('train_images_dir', 'dataset/train/data')
+        self.val_images_dir = data_config.get('validation_images_dir', 'dataset/validation/data')
+        self.target_class = data_config.get('target_class', 'Plastic bag')
     
-    def load_filtered_annotations(self, json_path: str, target_class: str = 'Plastic bag') -> pd.DataFrame:
+    def load_filtered_annotations(self, json_path: str, target_class: str = None) -> pd.DataFrame:
         """
         Load and filter annotations for only the target class.
         
         Args:
             json_path: Path to the JSON annotations file
-            target_class: Name of the target class to filter for
+            target_class: Name of the target class to filter for (uses config if None)
             
         Returns:
             DataFrame with filtered annotations
         """
+        if target_class is None:
+            target_class = self.target_class
         with open(json_path) as f:
             data = json.load(f)
         
@@ -144,24 +147,37 @@ class DataLoader:
             train_image_ids: List of training image IDs
             validation_image_ids: List of validation image IDs
         """
-        os.makedirs('output', exist_ok=True)
-        df_train.to_csv('output/processed_train_data.csv', index=False)
-        df_validation.to_csv('output/processed_validation_data.csv', index=False)
+        data_config = get_data_config(self.config)
+        output_dir = data_config.get('output_dir', 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        df_train.to_csv(f'{output_dir}/processed_train_data.csv', index=False)
+        df_validation.to_csv(f'{output_dir}/processed_validation_data.csv', index=False)
         
-        print(f"Saving train image ids to output/train_image_ids.txt")
-        with open('output/train_image_ids.txt', 'w') as f:
+        print(f"Saving train image ids to {output_dir}/train_image_ids.txt")
+        with open(f'{output_dir}/train_image_ids.txt', 'w') as f:
             f.write('\n'.join(train_image_ids))
             
-        print(f"Saving validation image ids to output/validation_image_ids.txt")
-        with open('output/validation_image_ids.txt', 'w') as f:
+        print(f"Saving validation image ids to {output_dir}/validation_image_ids.txt")
+        with open(f'{output_dir}/validation_image_ids.txt', 'w') as f:
             f.write('\n'.join(validation_image_ids))
         
         print("Processed data saved successfully!")
 
 
 def main():
-    """Main function to demonstrate data loading."""
-    loader = DataLoader()
+    """Configuration-driven data loading."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Load and process plastic bag detection data")
+    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
+    
+    args = parser.parse_args()
+    
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    config = load_config(args.config)
+    
+    loader = DataLoader(config)
     
     # Load all data
     df_train, df_validation, train_ids, val_ids = loader.load_all_data()
