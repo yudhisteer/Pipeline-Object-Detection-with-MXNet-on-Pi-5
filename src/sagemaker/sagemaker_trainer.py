@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple, Any
 from dotenv import load_dotenv
 import boto3
 
-# Add src directory to path for imports
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils import (
     load_config,
@@ -22,6 +22,7 @@ from utils import (
     get_tuning_config,
     get_runtime_config,
 )
+
 
 load_dotenv()
 
@@ -63,10 +64,17 @@ class SageMakerTrainer:
                     f"Use: --role-arn {self.role_arn}"
                 )
         
-        # S3 paths
-        self.s3_train_data = None
-        self.s3_validation_data = None
+        # S3 paths - read directly from config
+        data_config = get_data_config(self.config)
+        self.s3_train_data = data_config.get('s3_train_path')
+        self.s3_validation_data = data_config.get('s3_validation_path')
         self.s3_output_location = f"s3://{self.bucket}/{self.prefix}/output"
+        
+        # Validate S3 paths
+        if not self.s3_train_data:
+            raise ValueError("s3_train_path must be specified in config.yaml under 'data' section")
+        if not self.s3_validation_data:
+            raise ValueError("s3_validation_path must be specified in config.yaml under 'data' section")
         
         # Training components
         self.od_model = None
@@ -74,42 +82,9 @@ class SageMakerTrainer:
         
         print(f"Initialized SageMaker trainer for bucket: {self.bucket}, prefix: {self.prefix}")
         print(f"Output location: {self.s3_output_location}")
-    
-    def upload_data_to_s3(self) -> Tuple[str, str]:
-        """
-        Upload training and validation data to S3.
-        
-        Returns:
-            Tuple of (train_s3_path, validation_s3_path)
-        """
-        # Get data paths from config
-        data_config = get_data_config(self.config)
-        train_rec_path = data_config.get('train_path')
-        test_rec_path = data_config.get('validation_path')
-        
-        if not train_rec_path:
-            raise ValueError("train_path must be specified in config.yaml under 'data' section")
-        if not test_rec_path:
-            raise ValueError("validation_path must be specified in config.yaml under 'data' section")
-        if not os.path.exists(train_rec_path):
-            raise FileNotFoundError(f"Training data not found: {train_rec_path}")
-        if not os.path.exists(test_rec_path):
-            raise FileNotFoundError(f"Test data not found: {test_rec_path}")
-        
-        # Upload training data
-        train_channel = f"{self.prefix}/train"
-        self.sess.upload_data(path=train_rec_path, bucket=self.bucket, key_prefix=train_channel)
-        self.s3_train_data = f"s3://{self.bucket}/{train_channel}"
-        
-        # Upload validation data
-        validation_channel = f"{self.prefix}/validation"
-        self.sess.upload_data(path=test_rec_path, bucket=self.bucket, key_prefix=validation_channel)
-        self.s3_validation_data = f"s3://{self.bucket}/{validation_channel}"
-        
-        print(f"Training data uploaded to: {self.s3_train_data}")
-        print(f"Validation data uploaded to: {self.s3_validation_data}")
-        
-        return self.s3_train_data, self.s3_validation_data
+        print(f"S3 data paths from config:")
+        print(f"  Train: {self.s3_train_data}")
+        print(f"  Validation: {self.s3_validation_data}")
     
     def create_estimator(self) -> sagemaker.estimator.Estimator:
         """
@@ -239,7 +214,7 @@ class SageMakerTrainer:
             Dictionary of data channels for training
         """
         if not self.s3_train_data or not self.s3_validation_data:
-            raise ValueError("Must upload data to S3 first using upload_data_to_s3()")
+            raise ValueError("S3 data paths not found. Please ensure s3_train_path and s3_validation_path are set in config.yaml")
         
         train_data = sagemaker.inputs.TrainingInput(
             self.s3_train_data,
@@ -320,7 +295,7 @@ class SageMakerTrainer:
 
 
 def main():
-    """Configuration-driven SageMaker training."""
+    """Configuration-driven SageMaker training. Assumes data already uploaded to S3."""
     import argparse
     
     parser = argparse.ArgumentParser(description="Train plastic bag detection model on SageMaker")
@@ -332,12 +307,10 @@ def main():
     print(f"Loading configuration from: {args.config}")
     config = load_config(args.config)
     
+    print("Note: This script assumes training data is already uploaded to S3!")
+    
     # Create trainer with configuration
     trainer = SageMakerTrainer(config)
-    
-    # Upload data
-    print("Uploading training data to S3...")
-    trainer.upload_data_to_s3()
     
     # Create estimator
     print("Creating SageMaker estimator...")
@@ -369,13 +342,16 @@ if __name__ == "__main__":
     """
     Configuration-driven SageMaker training
     
-    How to use:
-    python src/sagemaker/sagemaker_trainer.py [--config path/to/config.yaml]
+    This script handles training only. Data upload is handled separately.
     
-    Default usage (uses config.yaml in project root):
-    python src/sagemaker/sagemaker_trainer.py
+    Prerequisites:
+    1. Upload training data to S3.
+    2. Ensure config.yaml has correct AWS settings
     
-    Custom config file:
-    python src/sagemaker/sagemaker_trainer.py --config my_config.yaml
+    Usage:
+    python src/sagemaker/sagemaker_trainer.py [--config CONFIG_FILE]
+    
+    Options:
+      --config CONFIG_FILE       Configuration file path (default: config.yaml)
     """
     
