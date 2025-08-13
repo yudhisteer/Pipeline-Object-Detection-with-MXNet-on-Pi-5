@@ -113,3 +113,16 @@ def get_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
         Runtime configuration dictionary
     """
     return config.get('runtime', {})
+
+
+def get_inference_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract inference configuration section.
+    
+    Args:
+        config: Full configuration dictionary
+        
+    Returns:
+        Inference configuration dictionary
+    """
+    return config.get('inference', {})
